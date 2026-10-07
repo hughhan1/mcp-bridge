@@ -1,0 +1,274 @@
+package mcphttp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"mime"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/hughhan1/mcp-bridge/proxy"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg jsonrpc.Message) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	select {
+	case <-b.stopping:
+		http.Error(w, "MCP process stopped", 503)
+		return
+	default:
+	}
+	if !accepts(r.Header, "application/json") || !accepts(r.Header, "text/event-stream") {
+		http.Error(w, "Accept must include application/json and text/event-stream", 406)
+		return
+	}
+	if msg == nil {
+		msg = ReadMessage(w, r, proxy.MaxMessageBytes)
+		if msg == nil {
+			return
+		}
+	}
+	req, ok := msg.(*jsonrpc.Request)
+	if !ok {
+		WriteError(w, 400, jsonrpc.ID{}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "expected a request or notification"})
+		return
+	}
+	if r.Header.Get("Last-Event-ID") != "" || r.Header.Get("Mcp-Session-Id") != "" {
+		WriteError(w, 400, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "transport sessions and stream resumption are unsupported"})
+		return
+	}
+	if req.Method == "notifications/cancelled" {
+		WriteError(w, 400, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "HTTP requests are cancelled by closing their response stream"})
+		return
+	}
+	if version := r.Header.Get("Mcp-Protocol-Version"); version != "" && version != b.version {
+		WriteError(w, 400, req.ID, proxy.UnsupportedVersion(version, []string{b.version}))
+		return
+	}
+	if req.IsCall() {
+		if req.Method == "initialize" {
+			var params mcp.InitializeParams
+			_ = json.Unmarshal(req.Params, &params)
+			WriteError(w, 400, req.ID, proxy.UnsupportedVersion(params.ProtocolVersion, []string{b.version}))
+			return
+		}
+		if issue := ValidateHeaders(r.Header, req, b.version); issue != nil {
+			WriteError(w, 400, req.ID, issue)
+			return
+		}
+		if req.Method == "tools/call" {
+			arguments, err := proxy.ToolHeaderArguments(r.Context(), req.Params, b.request)
+			if err == nil {
+				err = proxy.ValidateArgumentHeaders(r.Header, arguments)
+			}
+			if err != nil {
+				var wire *jsonrpc.Error
+				if errors.As(err, &wire) {
+					WriteError(w, 400, req.ID, wire)
+				} else {
+					WriteError(w, 502, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "could not validate upstream tool headers"})
+				}
+				return
+			}
+		}
+	} else {
+		if err := b.write(r.Context(), req); err != nil {
+			http.Error(w, "MCP process unavailable", 503)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	c, err := b.begin(r.Context(), req)
+	if err != nil {
+		WriteError(w, 503, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: err.Error()})
+		return
+	}
+	defer b.finish(c, true)
+	streaming := false
+	startStream := func() error {
+		if streaming {
+			return nil
+		}
+		streaming = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		return writeEvent(w, ": connected\n\n")
+	}
+	if req.Method == "subscriptions/listen" {
+		if startStream() != nil {
+			return
+		}
+	}
+	for {
+		wait, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		message, err := b.receive(wait, c)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && r.Context().Err() == nil {
+			if streaming && writeEvent(w, ": keepalive\n\n") != nil {
+				return
+			}
+			continue
+		}
+		if err != nil {
+			if r.Context().Err() == nil {
+				if !streaming {
+					WriteError(w, 502, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "MCP process stopped"})
+				} else {
+					data, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: req.ID, Error: &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "MCP process stopped"}})
+					_ = writeEvent(w, "event: message\ndata: "+string(data)+"\n\n")
+				}
+			}
+			return
+		}
+		response, isResponse := message.(*jsonrpc.Response)
+		if isResponse && response.Error == nil && b.pinned && req.Method == "server/discover" {
+			var result map[string]json.RawMessage
+			if json.Unmarshal(response.Result, &result) != nil || result == nil {
+				WriteError(w, 502, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid discovery response"})
+				return
+			}
+			result["supportedVersions"], _ = json.Marshal([]string{b.version})
+			response.Result, _ = json.Marshal(result)
+		}
+		data, err := jsonrpc.EncodeMessage(message)
+		if err != nil {
+			return
+		}
+		if isResponse && !streaming {
+			w.Header().Set("Content-Type", "application/json")
+			status := http.StatusOK
+			var wire *jsonrpc.Error
+			if errors.As(response.Error, &wire) {
+				switch wire.Code {
+				case jsonrpc.CodeMethodNotFound:
+					status = 404
+				case mcp.CodeHeaderMismatch, mcp.CodeUnsupportedProtocolVersion, jsonrpc.CodeInvalidParams:
+					status = 400
+				}
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write(data)
+			return
+		}
+		if startStream() != nil || writeEvent(w, "event: message\ndata: "+string(data)+"\n\n") != nil {
+			return
+		}
+		if isResponse {
+			return
+		}
+		if notification, ok := message.(*jsonrpc.Request); ok && notification.Method == "notifications/cancelled" {
+			return
+		}
+	}
+}
+
+func ReadMessage(w http.ResponseWriter, r *http.Request, maxBytes int64) jsonrpc.Message {
+	if typ, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); typ != "application/json" {
+		http.Error(w, "Content-Type must be application/json", 415)
+		return nil
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
+	if err != nil {
+		var limit *http.MaxBytesError
+		status := http.StatusBadRequest
+		if errors.As(err, &limit) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		http.Error(w, "invalid request body", status)
+		return nil
+	}
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	msg, err := jsonrpc.DecodeMessage(data)
+	if err != nil {
+		WriteError(w, 400, jsonrpc.ID{}, &jsonrpc.Error{Code: jsonrpc.CodeParseError, Message: "invalid JSON-RPC message"})
+		return nil
+	}
+	return msg
+}
+
+func writeEvent(w http.ResponseWriter, value string) error {
+	controller := http.NewResponseController(w)
+	_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
+	if _, err := io.WriteString(w, value); err != nil {
+		return err
+	}
+	return controller.Flush()
+}
+
+func WriteError(w http.ResponseWriter, status int, id jsonrpc.ID, issue *jsonrpc.Error) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	encoded, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: id, Error: issue})
+	_, _ = w.Write(encoded)
+}
+
+func accepts(headers http.Header, target string) bool {
+	category, _, _ := strings.Cut(target, "/")
+	for _, value := range headers.Values("Accept") {
+		for _, entry := range strings.Split(value, ",") {
+			media, params, err := mime.ParseMediaType(strings.TrimSpace(entry))
+			if err == nil && params["q"] != "0" && (media == target || media == "*/*" || media == category+"/*") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string) *jsonrpc.Error {
+	if headers.Get("Mcp-Protocol-Version") != expected || len(headers.Values("Mcp-Protocol-Version")) != 1 {
+		return proxy.UnsupportedVersion(headers.Get("Mcp-Protocol-Version"), []string{expected})
+	}
+	var params map[string]json.RawMessage
+	if json.Unmarshal(req.Params, &params) != nil {
+		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "params must be an object"}
+	}
+	var meta map[string]json.RawMessage
+	if json.Unmarshal(params["_meta"], &meta) != nil {
+		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "request metadata is required"}
+	}
+	var version string
+	_ = json.Unmarshal(meta[mcp.MetaKeyProtocolVersion], &version)
+	if version != expected {
+		return proxy.Mismatch("Mcp-Protocol-Version")
+	}
+	var info mcp.Implementation
+	var capabilities map[string]json.RawMessage
+	if json.Unmarshal(meta[mcp.MetaKeyClientInfo], &info) != nil || info.Name == "" || info.Version == "" || json.Unmarshal(meta[mcp.MetaKeyClientCapabilities], &capabilities) != nil || capabilities == nil {
+		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "clientInfo and clientCapabilities are required"}
+	}
+	if len(headers.Values("Mcp-Method")) != 1 || headers.Get("Mcp-Method") != req.Method {
+		return proxy.Mismatch("Mcp-Method")
+	}
+	field := ""
+	switch req.Method {
+	case "tools/call", "prompts/get":
+		field = "name"
+	case "resources/read":
+		field = "uri"
+	}
+	if field != "" {
+		var name string
+		if json.Unmarshal(params[field], &name) != nil || name == "" {
+			return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "missing name or uri"}
+		}
+		value, err := proxy.HeaderValue(headers, "Mcp-Name")
+		if err != nil || value != name {
+			return proxy.Mismatch("Mcp-Name")
+		}
+	}
+	return nil
+}
