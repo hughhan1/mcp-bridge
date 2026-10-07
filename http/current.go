@@ -17,7 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// ProtocolVersion is the current MCP revision enforced by strict HTTP mode.
+// ProtocolVersion is the current MCP revision available through [Options].
 const ProtocolVersion = proxy.CurrentVersion
 
 const (

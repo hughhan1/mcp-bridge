@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/hughhan1/mcp-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hughhan1/mcp-bridge/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go)](https://go.dev/doc/install)
+[![Go Reference](https://pkg.go.dev/badge/github.com/hughhan1/mcp-bridge.svg)](https://pkg.go.dev/github.com/hughhan1/mcp-bridge)
 [![Downloads](https://img.shields.io/badge/releases-download-blue)](https://github.com/hughhan1/mcp-bridge/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -150,9 +151,9 @@ For clients using an `mcpServers` configuration:
 
 This repository provides these Go packages:
 
-- [`github.com/hughhan1/mcp-bridge/http`](http) exposes a stdio MCP server as an HTTP handler.
-- [`github.com/hughhan1/mcp-bridge/stdio`](stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
-- [`github.com/hughhan1/mcp-bridge/proxy`](proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
+- [`github.com/hughhan1/mcp-bridge/http`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/http) exposes a stdio MCP server as an HTTP handler.
+- [`github.com/hughhan1/mcp-bridge/stdio`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
+- [`github.com/hughhan1/mcp-bridge/proxy`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
 
 They run inside your Go program without invoking the CLI.
 
@@ -239,3 +240,17 @@ func connectSSE(ctx context.Context, token string) error {
 ```
 
 </details>
+
+### Custom proxies
+
+Use [`proxy`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/proxy) to forward
+messages between existing MCP connections, list tools across pages, or handle MCP
+HTTP headers in your own bridge. For example, relay an upstream server connection
+to a downstream client connection:
+
+```go
+err := proxy.Relay(ctx, upstream, downstream)
+```
+
+Both connections close when forwarding ends. See the
+[API reference](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/proxy) for details.

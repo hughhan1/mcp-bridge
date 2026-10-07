@@ -174,6 +174,9 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 	}
 }
 
+// ReadMessage reads one JSON-RPC message from an application/json request body,
+// limited to maxBytes. The body remains readable on success. On failure it writes
+// an HTTP error response and returns nil.
 func ReadMessage(w http.ResponseWriter, r *http.Request, maxBytes int64) jsonrpc.Message {
 	if typ, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); typ != "application/json" {
 		http.Error(w, "Content-Type must be application/json", 415)
@@ -208,6 +211,9 @@ func writeEvent(w http.ResponseWriter, value string) error {
 	return controller.Flush()
 }
 
+// WriteError sends a JSON-RPC error response with the supplied HTTP status and
+// request ID. Use a zero jsonrpc.ID when the ID is unknown. Call it before writing
+// any other response headers or body.
 func WriteError(w http.ResponseWriter, status int, id jsonrpc.ID, issue *jsonrpc.Error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -228,6 +234,10 @@ func accepts(headers http.Header, target string) bool {
 	return false
 }
 
+// ValidateHeaders checks that MCP headers match req and the expected protocol
+// version. req must be non-nil. It returns nil on success or a protocol error
+// describing the mismatch. Tool argument headers require
+// [proxy.ValidateArgumentHeaders] separately.
 func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string) *jsonrpc.Error {
 	if headers.Get("Mcp-Protocol-Version") != expected || len(headers.Values("Mcp-Protocol-Version")) != 1 {
 		return proxy.UnsupportedVersion(headers.Get("Mcp-Protocol-Version"), []string{expected})

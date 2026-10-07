@@ -11,6 +11,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// Relay forwards MCP messages between an upstream server and a downstream client.
+// It closes both connections when forwarding ends or ctx is cancelled.
+// A downstream EOF or closed downstream output completes normally; upstream
+// disconnects, cancellation, and other transport failures return errors.
 func Relay(ctx context.Context, upstream, downstream mcp.Connection) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
