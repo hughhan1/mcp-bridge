@@ -8,11 +8,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Run exposes remote through local for the lifetime of ctx. It owns both
-// connections and closes them on EOF, cancellation, or failure. The protocol
-// handshake and messages are forwarded without translating protocol eras.
-// Local EOF or closed output completes normally; upstream disconnects and other
-// transport failures return errors.
+// Run exposes a remote MCP server through a local transport and closes both
+// connections when forwarding ends. A local EOF or closed local output completes
+// normally. Remote disconnects, cancellation, and other transport failures return
+// errors. Both transports must be non-nil.
 func Run(ctx context.Context, remote, local mcp.Transport) error {
 	if remote == nil || local == nil {
 		return errors.New("remote and local transports are required")

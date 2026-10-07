@@ -1,4 +1,4 @@
-// Package mcpstdio exposes remote MCP servers through a local SDK transport.
-// Run forwards protocol messages without translating protocol eras and owns
-// both connections until EOF, cancellation, or failure.
+// Package mcpstdio makes remote MCP servers available through a local transport,
+// typically stdio. [Run] forwards messages until the local connection closes,
+// the context is cancelled, or forwarding fails.
 package mcpstdio

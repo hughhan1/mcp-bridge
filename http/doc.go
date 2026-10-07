@@ -1,4 +1,4 @@
-// Package mcphttp exposes stdio MCP servers through an HTTP handler. Start owns
-// subprocesses and sessions; the host owns authentication, Origin protection,
-// TLS, and the HTTP listener.
+// Package mcphttp makes stdio MCP servers available over Streamable HTTP and
+// legacy SSE. [Start] returns an HTTP handler that accepts supported protocol
+// versions automatically or restricts clients to the version selected in [Options].
 package mcphttp

@@ -21,15 +21,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Options selects automatic negotiation or admission of one SDK-supported version.
+// Options controls which MCP protocol versions clients may use.
 type Options struct {
-	// ProtocolVersion requires one SDK-supported version. Empty selects automatically.
+	// ProtocolVersion restricts clients to one supported version. Empty allows negotiation.
 	ProtocolVersion string
 }
 
-// Server hosts a stdio MCP server over HTTP and owns its subprocesses.
-// It implements http.Handler and io.Closer. The host supplies authentication,
-// Origin protection, and the listener.
+// Server makes a stdio MCP server available over HTTP.
 type Server struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -59,13 +57,13 @@ type legacySession struct {
 	closing   bool
 }
 
-// Start serves Streamable HTTP and legacy SSE using fresh commands from command.
-// Empty options enable automatic negotiation. A specified ProtocolVersion pins
-// admission and negotiation to that version. Current mode verifies startup eagerly;
-// legacy sessions each start a process when clients arrive.
-// The factory must return a fresh, unstarted command with stdin and stdout unset.
-// It may be called concurrently; shared stderr writers must be safe for concurrent use.
-// Cancelling ctx closes the bridge and its subprocesses.
+// Start returns a handler that serves the MCP command over Streamable HTTP and
+// legacy SSE. Empty options allow protocol negotiation; ProtocolVersion restricts
+// clients to one supported revision. Cancelling ctx stops the server.
+//
+// command must return a fresh, unstarted command with stdin and stdout unset.
+// It must be safe to call concurrently, and any shared stderr writer must also
+// support concurrent use.
 func Start(ctx context.Context, command func() *exec.Cmd, opts Options) (*Server, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -98,14 +96,14 @@ func Start(ctx context.Context, command func() *exec.Cmd, opts Options) (*Server
 	return b, nil
 }
 
-// Wait blocks until the bridge closes or its retained current-protocol process fails.
-// Failures of individual legacy sessions do not terminate the bridge.
+// Wait blocks until the server stops and returns the error that stopped it,
+// or nil after a normal shutdown.
 func (b *Server) Wait() error {
 	<-b.done
 	return b.err
 }
 
-// Close stops accepting requests, closes sessions, and waits for owned processes.
+// Close stops the server and waits for shutdown to complete.
 func (b *Server) Close() error { b.stop(nil); return b.Wait() }
 
 func (b *Server) stop(err error) {
@@ -162,8 +160,8 @@ func (b *Server) getCurrent() (*currentBridge, error) {
 	return b.current, b.currentErr
 }
 
-// ServeHTTP serves /mcp, /sse, and /messages. Pinned current mode can be mounted
-// at any path. The host is responsible for authentication and Origin protection.
+// ServeHTTP serves /mcp, /sse, and /messages. When Options.ProtocolVersion is set
+// to [ProtocolVersion], the handler accepts requests at any path.
 func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	closed := b.closed

@@ -22,11 +22,21 @@ type headerProperty struct {
 	Properties map[string]headerProperty `json:"properties"`
 }
 
+// HeaderArgument associates a tool argument value with its MCP HTTP header.
+// Obtain values from [ToolHeaderArguments] and pass them to [SetArgumentHeaders]
+// or [ValidateArgumentHeaders].
 type HeaderArgument struct {
 	name  string
 	value any
 }
 
+// ToolHeaderArguments identifies the HTTP headers required by a tools/call request.
+// Schema properties marked x-mcp-header select the arguments.
+//
+// The params argument contains the call parameters. The request callback sends
+// catalog requests and returns their JSON results.
+//
+// It returns nil if the tool is not found, or an error if the lookup fails.
 func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) ([]HeaderArgument, error) {
 	var call struct {
 		Name      string                     `json:"name"`
@@ -79,6 +89,13 @@ func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request fu
 	return nil, nil
 }
 
+// ToolPages lists all pages of a tool catalog, preserving tool schemas and
+// extension fields.
+//
+// The params argument contains tools/list parameters; use {} for no options.
+// The request callback sends each catalog request and returns its JSON result.
+//
+// Iteration ends after the last page, cancellation, or an error.
 func ToolPages(ctx context.Context, params json.RawMessage, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) iter.Seq2[[]map[string]json.RawMessage, error] {
 	return func(yield func([]map[string]json.RawMessage, error) bool) {
 		var fields map[string]json.RawMessage
@@ -119,6 +136,11 @@ func ToolPages(ctx context.Context, params json.RawMessage, request func(context
 	}
 }
 
+// SetArgumentHeaders sets encoded MCP headers for arguments obtained from
+// [ToolHeaderArguments]. headers must be non-nil. Missing or null arguments leave
+// existing headers unchanged.
+//
+// Unsupported values return an error. Headers already set before the error remain set.
 func SetArgumentHeaders(headers http.Header, arguments []HeaderArgument) error {
 	for _, argument := range arguments {
 		name, value := argument.name, argument.value
@@ -134,6 +156,8 @@ func SetArgumentHeaders(headers http.Header, arguments []HeaderArgument) error {
 	return nil
 }
 
+// EncodeHeader formats text for use in an MCP HTTP header, preserving Unicode
+// characters and whitespace. Use [DecodeHeader] to recover the original text.
 func EncodeHeader(text string) string {
 	if strings.HasPrefix(text, "=?base64?") || strings.TrimSpace(text) != text || strings.IndexFunc(text, func(c rune) bool { return c < 0x20 || c > 0x7e }) >= 0 {
 		return "=?base64?" + base64.StdEncoding.EncodeToString([]byte(text)) + "?="
@@ -141,6 +165,10 @@ func EncodeHeader(text string) string {
 	return text
 }
 
+// ValidateArgumentHeaders checks that headers match the tool arguments returned
+// by [ToolHeaderArguments]. Missing or null arguments require no header.
+// It returns an MCP header-mismatch error for missing, duplicate, or invalid
+// argument headers. Unrelated headers are ignored.
 func ValidateArgumentHeaders(headers http.Header, arguments []HeaderArgument) error {
 	for _, argument := range arguments {
 		name, value := argument.name, argument.value
@@ -169,6 +197,8 @@ func primitiveMatches(value any, header string) bool {
 	}
 }
 
+// HeaderValue returns the decoded text of the named MCP header.
+// Missing, duplicate, or invalid values return an error.
 func HeaderValue(headers http.Header, name string) (string, error) {
 	values := headers.Values(name)
 	if len(values) != 1 {
@@ -177,6 +207,8 @@ func HeaderValue(headers http.Header, name string) (string, error) {
 	return DecodeHeader(values[0])
 }
 
+// DecodeHeader recovers the text of an MCP HTTP header value.
+// Invalid header values return an error.
 func DecodeHeader(value string) (string, error) {
 	if encoded, ok := strings.CutPrefix(value, "=?base64?"); ok {
 		encoded, ok = strings.CutSuffix(encoded, "?=")
@@ -195,6 +227,7 @@ func DecodeHeader(value string) (string, error) {
 	return value, nil
 }
 
+// Mismatch returns an MCP header-mismatch error naming the offending header.
 func Mismatch(name string) *jsonrpc.Error {
 	return &jsonrpc.Error{Code: mcp.CodeHeaderMismatch, Message: "header mismatch: " + name}
 }
