@@ -143,10 +143,18 @@ func (nopWriter) Close() error { return nil }
 
 func TestConnectCommand(t *testing.T) {
 	for _, mode := range []struct {
-		name, transport string
-		redirect        bool
-	}{{"http", "streamable-http", false}, {"sse", "sse", false}, {"http-redirect", "streamable-http", true}, {"sse-redirect", "sse", true}} {
+		name, transport, token, header, authorization string
+		redirect                                      bool
+	}{
+		{name: "http", transport: "streamable-http", header: "Bearer fixture", authorization: "Bearer fixture"},
+		{name: "sse", transport: "sse", token: "fixture", authorization: "Bearer fixture"},
+		{name: "anonymous", transport: "streamable-http"},
+		{name: "header overrides token", transport: "streamable-http", token: "unused", header: "Bearer fixture", authorization: "Bearer fixture"},
+		{name: "http-redirect", transport: "streamable-http", token: "fixture", authorization: "Bearer fixture", redirect: true},
+		{name: "sse-redirect", transport: "sse", header: "Bearer fixture", authorization: "Bearer fixture", redirect: true},
+	} {
 		t.Run(mode.name, func(t *testing.T) {
+			t.Setenv("MCP_BRIDGE_BEARER_TOKEN", mode.token)
 			s := cliServer()
 			var handler http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true})
 			if mode.transport == "sse" {
@@ -163,7 +171,7 @@ func TestConnectCommand(t *testing.T) {
 			var received atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				received.Add(1)
-				if r.Header.Get("Authorization") != "Bearer fixture" || !slices.Equal(r.Header.Values("X-Test"), []string{"one,two", "three"}) {
+				if r.Header.Get("Authorization") != mode.authorization || !slices.Equal(r.Header.Values("X-Test"), []string{"one,two", "three"}) {
 					t.Errorf("remote headers: %v", r.Header)
 				}
 				handler.ServeHTTP(w, r)
@@ -175,8 +183,12 @@ func TestConnectCommand(t *testing.T) {
 			defer cancel()
 			finished := make(chan error, 1)
 			var log bytes.Buffer
+			args := []string{"connect", server.URL, "--transport", mode.transport, "--header", "X-Test: one,two", "--header", "X-Test: three"}
+			if mode.header != "" {
+				args = append(args, "--header", "Authorization: "+mode.header)
+			}
 			go func() {
-				finished <- run(ctx, []string{"connect", "--header", "Authorization: Bearer fixture", server.URL, "--transport", mode.transport, "--header", "X-Test: one,two", "--header", "X-Test: three"}, inR, outW, &log)
+				finished <- run(ctx, args, inR, outW, &log)
 			}()
 			client := mcp.NewClient(&mcp.Implementation{Name: "cli-test", Version: "1"}, nil)
 			version := "2026-07-28"

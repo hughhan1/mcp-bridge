@@ -6,6 +6,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/hughhan1/mcp-bridge/proxy"
@@ -32,6 +33,9 @@ func newConnectCommand(input io.ReadCloser, output io.WriteCloser) *cobra.Comman
 					return errors.New("--header requires Name: value")
 				}
 				values.Add(strings.TrimSpace(name), strings.TrimSpace(content))
+			}
+			if token := os.Getenv("MCP_BRIDGE_BEARER_TOKEN"); token != "" && values["Authorization"] == nil {
+				values.Set("Authorization", "Bearer "+token)
 			}
 			client := &http.Client{Transport: headerTransport{headers: values}, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 				if len(via) >= 10 {

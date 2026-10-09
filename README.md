@@ -74,6 +74,10 @@ mcp-bridge connect --transport sse https://example.com/sse
 mcp-bridge connect --header 'Authorization: Bearer example' https://example.com/mcp
 ```
 
+Set `MCP_BRIDGE_BEARER_TOKEN` to pass a bearer token through the environment.
+An empty value sends no authorization header; an explicit `--header Authorization: ...`
+overrides it.
+
 <details open>
 <summary><code>mcp-bridge connect --help</code></summary>
 
