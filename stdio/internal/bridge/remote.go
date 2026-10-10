@@ -1,4 +1,4 @@
-package mcpstdio
+package bridge
 
 import (
 	"bufio"
