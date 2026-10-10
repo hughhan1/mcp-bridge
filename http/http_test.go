@@ -599,11 +599,12 @@ func fixtureServer(versions ...string) *mcp.Server {
 	options := &mcp.ServerOptions{
 		PageSize:                  1,
 		SupportedProtocolVersions: versions,
+		Capabilities:              &mcp.ServerCapabilities{Extensions: map[string]any{"io.modelcontextprotocol/ui": map[string]any{}, "example.com/custom": map[string]any{}}},
 		SubscribeHandler:          func(_ context.Context, _ *mcp.SubscribeRequest) error { return nil },
 		UnsubscribeHandler:        func(_ context.Context, _ *mcp.UnsubscribeRequest) error { return nil },
 	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, options)
-	mcp.AddTool(server, &mcp.Tool{Name: "echo", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string", "x-mcp-header": "Value"}}, "required": []string{"value"}}}, func(ctx context.Context, req *mcp.CallToolRequest, input struct {
+	mcp.AddTool(server, &mcp.Tool{Name: "echo", Meta: mcp.Meta{"ui": map[string]any{"resourceUri": "ui://fixture"}}, InputSchema: map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string", "x-mcp-header": "Value"}}, "required": []string{"value"}}}, func(ctx context.Context, req *mcp.CallToolRequest, input struct {
 		Value string `json:"value"`
 	}) (*mcp.CallToolResult, any, error) {
 		if token := req.Params.GetProgressToken(); token != nil {
@@ -613,7 +614,7 @@ func fixtureServer(versions ...string) *mcp.Server {
 		if init := req.Session.InitializeParams(); init != nil {
 			caps = init.Capabilities
 		}
-		return nil, map[string]any{"value": input.Value, "pid": os.Getpid(), "caps": caps}, nil
+		return nil, map[string]any{"value": input.Value, "pid": os.Getpid(), "caps": caps, "meta": req.Params.Meta}, nil
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: "slow"}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 		if token := req.Params.GetProgressToken(); token != nil {
@@ -646,13 +647,13 @@ func fixtureServer(versions ...string) *mcp.Server {
 		if err := req.Session.Log(ctx, &mcp.LoggingMessageParams{Level: "info", Data: "fixture-log"}); err != nil {
 			return nil, nil, err
 		}
-		if err := server.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: "test://item"}); err != nil {
+		if err := server.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: "ui://fixture"}); err != nil {
 			return nil, nil, err
 		}
 		return nil, map[string]any{}, nil
 	})
-	server.AddResource(&mcp.Resource{URI: "test://item", Name: "item"}, func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "test://item", Text: "resource"}}}, nil
+	server.AddResource(&mcp.Resource{URI: "ui://fixture", Name: "app", MIMEType: "text/html;profile=mcp-app"}, func(context.Context, *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "ui://fixture", MIMEType: "text/html;profile=mcp-app", Text: "<main>app</main>", Meta: mcp.Meta{"ui": map[string]any{"prefersBorder": true}}}}}, nil
 	})
 	server.AddPrompt(&mcp.Prompt{Name: "greet"}, func(_ context.Context, _ *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		return &mcp.GetPromptResult{Messages: []*mcp.PromptMessage{{Role: "user", Content: &mcp.TextContent{Text: "hello"}}}}, nil
@@ -669,6 +670,7 @@ func commandFactory() *exec.Cmd {
 
 func clientOptions(progress chan<- any) *mcp.ClientOptions {
 	return &mcp.ClientOptions{
+		Capabilities:           &mcp.ClientCapabilities{Extensions: map[string]any{"io.modelcontextprotocol/ui": map[string]any{}}},
 		LoggingMessageHandler:  func(_ context.Context, _ *mcp.LoggingMessageRequest) { progress <- "log" },
 		ResourceUpdatedHandler: func(_ context.Context, _ *mcp.ResourceUpdatedNotificationRequest) { progress <- "resource" },
 		ElicitationHandler: func(_ context.Context, _ *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
@@ -683,7 +685,7 @@ func clientOptions(progress chan<- any) *mcp.ClientOptions {
 	}
 }
 
-func exercise(t *testing.T, session *mcp.ClientSession, legacy bool, progress <-chan any) {
+func exercise(t *testing.T, session *mcp.ClientSession, legacy, translated bool, progress <-chan any) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -696,19 +698,37 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy bool, progress <-
 		if slices.Contains(tools, tool.Name) {
 			t.Fatalf("tool repeated across pages: %s", tool.Name)
 		}
+		if tool.Name == "echo" && tool.Meta["ui"].(map[string]any)["resourceUri"] != "ui://fixture" {
+			t.Fatalf("MCP App tool metadata: %v", tool.Meta)
+		}
 		tools = append(tools, tool.Name)
 	}
 	slices.Sort(tools)
 	if !slices.Equal(tools, []string{"ask", "crash", "echo", "notify", "slow", "wait-cancel"}) {
 		t.Fatalf("forwarded tools: %v", tools)
 	}
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{Meta: mcp.Meta{"progressToken": "caller-token"}, Name: "echo", Arguments: map[string]any{"value": "hello"}})
+	meta := mcp.Meta{"progressToken": "caller-token"}
+	if translated {
+		meta[mcp.MetaKeyProtocolVersion] = "2025-11-25"
+		meta[mcp.MetaKeyClientInfo] = map[string]any{"name": "spoofed"}
+	}
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Meta: meta, Name: "echo", Arguments: map[string]any{"value": "hello"}})
 	if err != nil || result.IsError {
 		t.Fatalf("echo: %v %v", result, err)
 	}
 	value, ok := result.StructuredContent.(map[string]any)
 	if !ok || value["value"] != "hello" {
 		t.Fatalf("echo payload: %#v", result)
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("tool response lost readable content")
+	}
+	if translated {
+		meta := value["meta"].(map[string]any)
+		caps := meta[mcp.MetaKeyClientCapabilities].(map[string]any)
+		if meta[mcp.MetaKeyProtocolVersion] != ProtocolVersion || meta[mcp.MetaKeyClientInfo].(map[string]any)["name"] != "test" || caps["elicitation"] != nil {
+			t.Fatalf("upstream identity and capabilities: %v", meta)
+		}
 	}
 	select {
 	case token := <-progress:
@@ -718,9 +738,9 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy bool, progress <-
 	case <-ctx.Done():
 		t.Fatal("no progress notification")
 	}
-	resource, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "test://item"})
-	if err != nil || len(resource.Contents) != 1 || resource.Contents[0].Text != "resource" {
-		t.Fatalf("resource: %v %v", resource, err)
+	app, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "ui://fixture"})
+	if err != nil || len(app.Contents) != 1 || app.Contents[0].Text != "<main>app</main>" || app.Contents[0].MIMEType != "text/html;profile=mcp-app" || app.Contents[0].Meta["ui"].(map[string]any)["prefersBorder"] != true {
+		t.Fatalf("MCP App resource: %v %v", app, err)
 	}
 	prompt, err := session.GetPrompt(ctx, &mcp.GetPromptParams{Name: "greet"})
 	if err != nil || len(prompt.Messages) != 1 {
@@ -729,7 +749,7 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy bool, progress <-
 	if _, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "test://missing"}); err == nil {
 		t.Fatal("missing resource error lost")
 	}
-	if legacy {
+	if legacy && !translated {
 		answer, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "ask", Arguments: map[string]any{}})
 		if err != nil || answer.IsError || !reflect.DeepEqual(answer.StructuredContent, map[string]any{"answer": "yes"}) {
 			t.Fatalf("elicitation: %v %v", answer, err)
@@ -737,7 +757,7 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy bool, progress <-
 		if err := session.SetLoggingLevel(ctx, &mcp.SetLoggingLevelParams{Level: "debug"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: "test://item"}); err != nil {
+		if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: "ui://fixture"}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "notify", Arguments: map[string]any{}}); err != nil {
@@ -752,7 +772,7 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy bool, progress <-
 				t.Fatalf("missing legacy notifications: %v", seen)
 			}
 		}
-		if err := session.Unsubscribe(ctx, &mcp.UnsubscribeParams{URI: "test://item"}); err != nil {
+		if err := session.Unsubscribe(ctx, &mcp.UnsubscribeParams{URI: "ui://fixture"}); err != nil {
 			t.Fatal(err)
 		}
 		slow, stop := context.WithCancel(ctx)
@@ -786,27 +806,32 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy bool, progress <-
 
 func TestProxyTransports(t *testing.T) {
 	type mode struct {
-		name, version string
-		sse, fallback bool
+		name, version              string
+		sse, fallback, noDiscovery bool
 	}
 	modes := []mode{
 		{name: "sse", version: "2025-11-25", sse: true},
 		{name: "sse-oldest", version: "2024-11-05", sse: true},
 		{name: "fallback", version: "2025-11-25", fallback: true},
+		{name: "no-discovery", version: "2025-11-25", fallback: true, noDiscovery: true},
 	}
 	for _, version := range mcp.SupportedProtocolVersions() {
 		modes = append(modes, mode{name: version, version: version})
 	}
 	for _, direction := range []struct {
-		name                string
-		serve, connect, pin bool
+		name                           string
+		serve, connect, pin, translate bool
 	}{
 		{name: "serve", serve: true},
 		{name: "serve-pinned", serve: true, pin: true},
 		{name: "connect", connect: true},
+		{name: "connect-translated", connect: true, translate: true},
 		{name: "connect-pinned", serve: true, connect: true, pin: true},
 	} {
 		for _, mode := range modes {
+			if direction.translate && (mode.sse || mode.fallback || mode.version == ProtocolVersion) || mode.noDiscovery && direction.name != "connect" {
+				continue
+			}
 			t.Run(direction.name+"/"+mode.name, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 				defer cancel()
@@ -837,9 +862,12 @@ func TestProxyTransports(t *testing.T) {
 					if mode.fallback {
 						versions = []string{mode.version}
 					}
+					if direction.translate {
+						versions = []string{ProtocolVersion}
+					}
 					upstream := fixtureServer(versions...)
 					getServer := func(*http.Request) *mcp.Server { return upstream }
-					handler = mcp.NewStreamableHTTPHandler(getServer, &mcp.StreamableHTTPOptions{Stateless: mode.version == ProtocolVersion})
+					handler = mcp.NewStreamableHTTPHandler(getServer, &mcp.StreamableHTTPOptions{Stateless: mode.version == ProtocolVersion || direction.translate})
 					if mode.sse {
 						handler = mcp.NewSSEHandler(getServer, nil)
 					}
@@ -847,6 +875,13 @@ func TestProxyTransports(t *testing.T) {
 				posted := make(chan struct{})
 				var postedOnce sync.Once
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if mode.noDiscovery && r.Header.Get("Mcp-Method") == "server/discover" {
+						http.NotFound(w, r)
+						return
+					}
+					if direction.translate && r.Header.Get("Mcp-Name") == "echo" && (r.Header.Get("Mcp-Protocol-Version") != ProtocolVersion || r.Header.Get("Mcp-Param-Value") != "hello") {
+						t.Errorf("translated HTTP headers: %v", r.Header)
+					}
 					if mode.sse && r.Method == http.MethodGet {
 						response := w
 						w = &responseWriter{ResponseWriter: w, flush: func() {
@@ -880,7 +915,7 @@ func TestProxyTransports(t *testing.T) {
 				if direction.pin && mode.sse {
 					opts.ProtocolVersion = "2025-11-25"
 				}
-				if mode.fallback || direction.pin && !mode.sse {
+				if mode.fallback && !mode.noDiscovery || direction.pin && !mode.sse {
 					opts = nil
 				}
 				session, err := client.Connect(ctx, transport, opts)
@@ -891,7 +926,11 @@ func TestProxyTransports(t *testing.T) {
 				if result := session.InitializeResult(); mode.version != ProtocolVersion && (result == nil || result.ProtocolVersion != mode.version) {
 					t.Fatalf("negotiated protocol: %v, want %s", result, mode.version)
 				}
-				exercise(t, session, mode.version != ProtocolVersion, progress)
+				caps := session.InitializeResult().Capabilities.Extensions
+				if caps["io.modelcontextprotocol/ui"] == nil || (caps["example.com/custom"] != nil) == direction.translate {
+					t.Fatalf("negotiated capabilities: %v", caps)
+				}
+				exercise(t, session, mode.version != ProtocolVersion, direction.translate, progress)
 				if direction.pin && !direction.connect && !mode.sse && !mode.fallback {
 					if mode.version == ProtocolVersion {
 						status, discovered := send(t, server, "server/discover", nil)
@@ -1039,7 +1078,7 @@ func TestLegacyNotificationsBeforeGET(t *testing.T) {
 	}
 	post("initialize", map[string]any{"protocolVersion": "2025-11-25", "clientInfo": map[string]any{"name": "delayed-get", "version": "1"}, "capabilities": map[string]any{}})
 	post("logging/setLevel", map[string]any{"level": "debug"})
-	post("resources/subscribe", map[string]any{"uri": "test://item"})
+	post("resources/subscribe", map[string]any{"uri": "ui://fixture"})
 	post("tools/call", map[string]any{"name": "notify", "arguments": map[string]any{}})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/mcp", nil)
 	req.Header.Set("Accept", "text/event-stream")
